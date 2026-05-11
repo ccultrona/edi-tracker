@@ -214,7 +214,8 @@ def auto_detect_snapshot_date(df):
         candidates.append((latest_col_date, f"latest snapshot column ({snap_cols[-1][0]})"))
 
     # Method 2: latest 'Latest Status Update' date in rows
-    update_col = next((c for c in df.columns if "latest status update" in str(c).lower()), None)
+    update_col = next((c for c in df.columns if "latest status update" in str(c).lower()),
+                      next((c for c in df.columns if "status update" in str(c).lower()), None))
     if update_col is not None:
         dates = []
         for val in df[update_col]:
@@ -267,21 +268,36 @@ def ingest_dataframe(df, snapshot_label, existing_data, mark_missing_as_deleted=
     snap_cols = extract_snapshot_cols(df.columns)
     keys_in_this_upload = set()
 
+    # Strip completely blank rows and find correct column names flexibly
+    customer_col = next((c for c in df.columns if str(c).strip().lower() == "customer"), "Customer")
+    vendor_col = next((c for c in df.columns if "vendor" in str(c).lower() and "edi" in str(c).lower()), 
+                      next((c for c in df.columns if "vendor" in str(c).lower()), "Vendor EDI Provider Shipper"))
+    status_col = next((c for c in df.columns if "edi connection status" in str(c).lower()), 
+                      next((c for c in df.columns if "status" in str(c).lower() and "latest" not in str(c).lower()), "EDI Connection Status"))
+    update_col = next((c for c in df.columns if "latest status update" in str(c).lower()), "Latest Status Update")
+    bic_col = next((c for c in df.columns if "ball in court" in str(c).lower()), "Ball In Court")
+
+    # Drop rows where both customer and status are blank
+    df = df[df[customer_col].notna() | df[status_col].notna()]
+    df = df[df[customer_col].notna()]
+    df = df[df[customer_col].astype(str).str.strip() != ""]
+    df = df[df[customer_col].astype(str).str.strip() != "nan"]
+
     for _, row in df.iterrows():
-        customer = row.get("Customer", "")
-        vendor = row.get("Vendor EDI Provider Shipper", "")
+        customer = row.get(customer_col, "")
+        vendor = row.get(vendor_col, "")
         if not customer or (isinstance(customer, float) and np.isnan(customer)):
             continue
-        if str(customer).strip() == "":
+        if str(customer).strip() == "" or str(customer).strip().lower() == "nan":
             continue
 
         key = connection_key(customer, vendor)
         keys_in_this_upload.add(key)
 
         provider, shipper = parse_provider_shipper(vendor)
-        current_status = normalize_status(row.get("EDI Connection Status", ""))
-        last_update = parse_excel_date(row.get("Latest Status Update"))
-        ball_in_court = str(row.get("Ball In Court", "")).strip()
+        current_status = normalize_status(row.get(status_col, ""))
+        last_update = parse_excel_date(row.get(update_col))
+        ball_in_court = str(row.get(bic_col, "")).strip()
 
         is_new = key not in connections
         if is_new:
@@ -435,9 +451,27 @@ def confidence_label(basis, n):
         return "MED", "confidence-med"
     return "LOW", "confidence-low"
 
-# ── Load state ─────────────────────────────────────────────────────────────────
+# ── Load state + auto-fetch on startup ────────────────────────────────────────
 if "data" not in st.session_state:
     st.session_state.data = load_data()
+    st.session_state.auto_loaded = False
+
+# Auto-fetch from Google Sheet every time the app starts (solves Streamlit Cloud persistence)
+if not st.session_state.get("auto_loaded"):
+    _saved_url = st.session_state.data.get("sheet_url")
+    if _saved_url:
+        with st.spinner("Loading latest data from Google Sheet..."):
+            try:
+                _df = fetch_google_sheet(_saved_url)
+                _snap_date, _snap_source = auto_detect_snapshot_date(_df)
+                st.session_state.data, _, _, _, _ = ingest_dataframe(
+                    _df, _snap_date, st.session_state.data, mark_missing_as_deleted=True
+                )
+                st.session_state.data["last_sheet_refresh"] = datetime.now().isoformat()
+                save_data(st.session_state.data)
+            except Exception as _e:
+                st.warning(f"Could not auto-refresh sheet on startup: {_e}")
+    st.session_state.auto_loaded = True
 
 data = st.session_state.data
 connections = data.get("connections", {})
