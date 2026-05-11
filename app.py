@@ -233,26 +233,36 @@ def auto_detect_snapshot_date(df):
     return best[0], best[1]
 
 # ── Google Sheets fetch ────────────────────────────────────────────────────────
-def gsheet_url_to_csv(url):
-    """Convert any Google Sheets URL to a CSV export URL."""
-    # Extract the spreadsheet ID
+def fetch_google_sheet(url):
+    """
+    Fetch a public Google Sheet as a DataFrame.
+    Extracts sheet ID and gid directly from the URL — no tab guessing needed.
+    """
     m = re.search(r'/d/([a-zA-Z0-9_-]+)', url)
     if not m:
-        raise ValueError("Could not find spreadsheet ID in URL. Make sure you paste the full Google Sheets URL.")
+        raise ValueError("Could not find spreadsheet ID. Paste the full Google Sheets URL.")
     sheet_id = m.group(1)
 
-    # Try to extract gid (tab id)
-    gid_m = re.search(r'gid=(\d+)', url)
+    # Extract gid — check both ?gid= and #gid= patterns
+    gid_m = re.search(r'[#?&]gid=(\d+)', url)
     gid = gid_m.group(1) if gid_m else "0"
 
-    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    req = urllib.request.Request(csv_url, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; EDITracker/1.0)",
+        "Accept": "text/csv,text/plain,*/*",
+    })
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        raw = resp.read().decode("utf-8", errors="ignore")
 
-def fetch_google_sheet(url):
-    """Fetch a public Google Sheet as a DataFrame."""
-    csv_url = gsheet_url_to_csv(url)
-    with urllib.request.urlopen(csv_url) as response:
-        content = response.read().decode("utf-8")
-    df = pd.read_csv(io.StringIO(content))
+    df = pd.read_csv(io.StringIO(raw))
+
+    # Validate we got the right tab
+    if "EDI Connection Status" not in df.columns and "Customer" not in df.columns:
+        raise ValueError(
+            f"The tab loaded (gid={gid}) doesn't look like the Connections & Status sheet. "
+            "Make sure you paste the URL while on the correct tab."
+        )
     return df
 
 # ── Core ingestion ─────────────────────────────────────────────────────────────
